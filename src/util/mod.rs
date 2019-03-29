@@ -16,7 +16,7 @@
 //!
 //! Functions needed by all parts of the Bitcoin library
 
-pub mod privkey;
+pub mod key;
 pub mod address;
 pub mod base58;
 pub mod bip32;
@@ -25,11 +25,10 @@ pub mod contracthash;
 pub mod decimal;
 pub mod hash;
 pub mod misc;
+pub mod psbt;
 pub mod uint;
 
 use std::{error, fmt};
-
-use secp256k1;
 
 use network;
 use consensus::encode;
@@ -51,7 +50,7 @@ pub trait BitArray {
     /// Create all-zeros value
     fn zero() -> Self;
 
-    /// Create value represeting one
+    /// Create value representing one
     fn one() -> Self;
 }
 
@@ -59,8 +58,6 @@ pub trait BitArray {
 /// if appropriate.
 #[derive(Debug)]
 pub enum Error {
-    /// secp-related error
-    Secp256k1(secp256k1::Error),
     /// Encoding error
     Encode(encode::Error),
     /// Network error
@@ -74,7 +71,6 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            Error::Secp256k1(ref e) => fmt::Display::fmt(e, f),
             Error::Encode(ref e) => fmt::Display::fmt(e, f),
             Error::Network(ref e) => fmt::Display::fmt(e, f),
             Error::SpvBadProofOfWork | Error::SpvBadTarget => f.write_str(error::Error::description(self)),
@@ -85,7 +81,6 @@ impl fmt::Display for Error {
 impl error::Error for Error {
     fn cause(&self) -> Option<&error::Error> {
         match *self {
-            Error::Secp256k1(ref e) => Some(e),
             Error::Encode(ref e) => Some(e),
             Error::Network(ref e) => Some(e),
             Error::SpvBadProofOfWork | Error::SpvBadTarget => None
@@ -94,19 +89,11 @@ impl error::Error for Error {
 
     fn description(&self) -> &str {
         match *self {
-            Error::Secp256k1(ref e) => e.description(),
             Error::Encode(ref e) => e.description(),
             Error::Network(ref e) => e.description(),
             Error::SpvBadProofOfWork => "target correct but not attained",
             Error::SpvBadTarget => "target incorrect",
         }
-    }
-}
-
-#[doc(hidden)]
-impl From<secp256k1::Error> for Error {
-    fn from(e: secp256k1::Error) -> Error {
-        Error::Secp256k1(e)
     }
 }
 

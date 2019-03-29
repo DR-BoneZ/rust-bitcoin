@@ -33,8 +33,6 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::{mem, u32};
 
-use util::hash::Sha256dHash;
-
 use std::error;
 use std::fmt;
 use std::io;
@@ -43,8 +41,11 @@ use byteorder::{LittleEndian, WriteBytesExt, ReadBytesExt};
 use hex::encode as hex_encode;
 
 use bitcoin_bech32;
+use bitcoin_hashes::{sha256d, Hash as HashTrait};
+use secp256k1;
 
 use util::base58;
+use util::psbt;
 
 /// Encoding error
 #[derive(Debug)]
@@ -57,6 +58,10 @@ pub enum Error {
     Bech32(bitcoin_bech32::Error),
     /// Error from the `byteorder` crate
     ByteOrder(io::Error),
+    /// secp-related error
+    Secp256k1(secp256k1::Error),
+    /// PSBT-related error
+    Psbt(psbt::Error),
     /// Network magic was not expected
     UnexpectedNetworkMagic {
         /// The expected network magic
@@ -99,6 +104,8 @@ impl fmt::Display for Error {
             Error::Base58(ref e) => fmt::Display::fmt(e, f),
             Error::Bech32(ref e) => fmt::Display::fmt(e, f),
             Error::ByteOrder(ref e) => fmt::Display::fmt(e, f),
+            Error::Secp256k1(ref e) => fmt::Display::fmt(e, f),
+            Error::Psbt(ref e) => fmt::Display::fmt(e, f),
             Error::UnexpectedNetworkMagic { expected: ref e, actual: ref a } => write!(f, "{}: expected {}, actual {}", error::Error::description(self), e, a),
             Error::OversizedVectorAllocation { requested: ref r, max: ref m } => write!(f, "{}: requested {}, maximum {}", error::Error::description(self), r, m),
             Error::InvalidChecksum { expected: ref e, actual: ref a } => write!(f, "{}: expected {}, actual {}", error::Error::description(self), hex_encode(e), hex_encode(a)),
@@ -119,6 +126,8 @@ impl error::Error for Error {
             Error::Base58(ref e) => Some(e),
             Error::Bech32(ref e) => Some(e),
             Error::ByteOrder(ref e) => Some(e),
+            Error::Secp256k1(ref e) => Some(e),
+            Error::Psbt(ref e) => Some(e),
             Error::UnexpectedNetworkMagic { .. }
             | Error::OversizedVectorAllocation { .. }
             | Error::InvalidChecksum { .. }
@@ -137,6 +146,8 @@ impl error::Error for Error {
             Error::Base58(ref e) => e.description(),
             Error::Bech32(ref e) => e.description(),
             Error::ByteOrder(ref e) => e.description(),
+            Error::Secp256k1(ref e) => e.description(),
+            Error::Psbt(ref e) => e.description(),
             Error::UnexpectedNetworkMagic { .. } => "unexpected network magic",
             Error::OversizedVectorAllocation { .. } => "allocation of oversized vector requested",
             Error::InvalidChecksum { .. } => "invalid checksum",
@@ -164,11 +175,24 @@ impl From<bitcoin_bech32::Error> for Error {
     }
 }
 
+#[doc(hidden)]
+impl From<secp256k1::Error> for Error {
+    fn from(e: secp256k1::Error) -> Error {
+        Error::Secp256k1(e)
+    }
+}
 
 #[doc(hidden)]
 impl From<io::Error> for Error {
     fn from(error: io::Error) -> Self {
         Error::Io(error)
+    }
+}
+
+#[doc(hidden)]
+impl From<psbt::Error> for Error {
+    fn from(e: psbt::Error) -> Error {
+        Error::Psbt(e)
     }
 }
 
@@ -193,16 +217,28 @@ pub fn serialize_hex<T: ?Sized>(data: &T) -> String
 pub fn deserialize<'a, T>(data: &'a [u8]) -> Result<T, Error>
      where T: Decodable<Cursor<&'a [u8]>>
 {
-    let mut decoder = Cursor::new(data);
-    let rv = Decodable::consensus_decode(&mut decoder)?;
+    let (rv, consumed) = deserialize_partial(data)?;
 
-    // Fail if data is not consumed entirely.
-    if decoder.position() == data.len() as u64 {
+    // Fail if data are not consumed entirely.
+    if consumed == data.len() {
         Ok(rv)
     } else {
         Err(Error::ParseFailed("data not consumed entirely when explicitly deserializing"))
     }
 }
+
+/// Deserialize an object from a vector, but will not report an error if said deserialization
+/// doesn't consume the entire vector.
+pub fn deserialize_partial<'a, T>(data: &'a [u8]) -> Result<(T, usize), Error>
+    where T: Decodable<Cursor<&'a [u8]>>
+{
+    let mut decoder = Cursor::new(data);
+    let rv = Decodable::consensus_decode(&mut decoder)?;
+    let consumed = decoder.position() as usize;
+
+    Ok((rv, consumed))
+}
+
 
 /// A simple Encoder trait
 pub trait Encoder {
@@ -482,6 +518,7 @@ impl_array!(8);
 impl_array!(12);
 impl_array!(16);
 impl_array!(32);
+impl_array!(33);
 
 impl<S: Encoder, T: Encodable<S>> Encodable<S> for [T] {
     #[inline]
@@ -535,37 +572,10 @@ impl<D: Decoder, T: Decodable<D>> Decodable<D> for Box<[T]> {
     }
 }
 
-// Options (encoded as vectors of length 0 or 1)
-impl<S: Encoder, T: Encodable<S>> Encodable<S> for Option<T> {
-    #[inline]
-    fn consensus_encode(&self, s: &mut S) -> Result<(), self::Error> {
-        match *self {
-            Some(ref data) => {
-                1u8.consensus_encode(s)?;
-                data.consensus_encode(s)?;
-            }
-            None => { 0u8.consensus_encode(s)?; }
-        }
-        Ok(())
-    }
-}
-
-impl<D: Decoder, T:Decodable<D>> Decodable<D> for Option<T> {
-    #[inline]
-    fn consensus_decode(d: &mut D) -> Result<Option<T>, self::Error> {
-        let bit: u8 = Decodable::consensus_decode(d)?;
-        Ok(if bit != 0 {
-            Some(Decodable::consensus_decode(d)?)
-        } else {
-            None
-        })
-    }
-}
-
 
 /// Do a double-SHA256 on some data and return the first 4 bytes
 fn sha2_checksum(data: &[u8]) -> [u8; 4] {
-    let checksum = Sha256dHash::from_data(data);
+    let checksum = <sha256d::Hash as HashTrait>::hash(data);
     [checksum[0], checksum[1], checksum[2], checksum[3]]
 }
 
@@ -678,7 +688,18 @@ impl<D, K, V> Decodable<D> for HashMap<K, V>
     }
 }
 
+impl<S: Encoder> Encodable<S> for sha256d::Hash {
+    fn consensus_encode(&self, s: &mut S) -> Result<(), self::Error> {
+        self.into_inner().consensus_encode(s)
+    }
+}
 
+impl<D: Decoder> Decodable<D> for sha256d::Hash {
+    fn consensus_decode(d: &mut D) -> Result<sha256d::Hash, self::Error> {
+        let inner: [u8; 32] = Decodable::consensus_decode(d)?;
+        Ok(sha256d::Hash::from_slice(&inner).unwrap())
+    }
+}
 
 // Tests
 #[cfg(test)]
@@ -802,12 +823,6 @@ mod tests {
     }
 
     #[test]
-    fn serialize_option_test() {
-        assert_eq!(serialize(&None::<u8>), vec![0]);
-        assert_eq!(serialize(&Some(0xFFu8)), vec![1, 0xFF]);
-    }
-
-    #[test]
     fn deserialize_int_test() {
         // bool
         assert!((deserialize(&[58u8, 0]) as Result<bool, _>).is_err());
@@ -866,16 +881,6 @@ mod tests {
     fn deserialize_checkeddata_test() {
         let cd: Result<CheckedData, _> = deserialize(&[5u8, 0, 0, 0, 162, 107, 175, 90, 1, 2, 3, 4, 5]);
         assert_eq!(cd.ok(), Some(CheckedData(vec![1u8, 2, 3, 4, 5])));
-    }
-
-    #[test]
-    fn deserialize_option_test() {
-        let none: Result<Option<u8>, _> = deserialize(&[0u8]);
-        let good: Result<Option<u8>, _> = deserialize(&[1u8, 0xFF]);
-        let bad: Result<Option<u8>, _> = deserialize(&[2u8]);
-        assert!(bad.is_err());
-        assert_eq!(none.ok(), Some(None));
-        assert_eq!(good.ok(), Some(Some(0xFF)));
     }
 
     #[test]

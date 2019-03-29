@@ -35,6 +35,7 @@
 #![cfg_attr(feature = "clippy", allow(extend_from_slice))]   // `extend_from_slice` only available since 1.6
 
 // Coding conventions
+#![forbid(unsafe_code)]
 #![deny(non_upper_case_globals)]
 #![deny(non_camel_case_types)]
 #![deny(non_snake_case)]
@@ -42,12 +43,13 @@
 #![deny(missing_docs)]
 
 extern crate bitcoin_bech32;
+extern crate bitcoin_hashes;
 extern crate byteorder;
-extern crate crypto;
 extern crate hex;
 extern crate rand;
 extern crate secp256k1;
 #[cfg(feature = "serde")] extern crate serde;
+#[cfg(feature = "serde_test")] extern crate serde_test;
 #[cfg(feature = "strason")] extern crate strason;
 #[cfg(all(test, feature = "unstable"))] extern crate test;
 #[cfg(feature="bitcoinconsensus")] extern crate bitcoinconsensus;
@@ -76,9 +78,7 @@ pub use network::constants::Network;
 pub use util::Error;
 pub use util::address::Address;
 pub use util::hash::BitcoinHash;
-pub use util::privkey::Privkey;
+pub use util::key::PrivateKey;
+pub use util::key::PublicKey;
 pub use util::decimal::Decimal;
 pub use util::decimal::UDecimal;
-
-#[cfg(feature = "fuzztarget")]
-pub mod fuzz_util;
